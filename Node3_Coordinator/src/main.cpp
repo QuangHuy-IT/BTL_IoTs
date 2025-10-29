@@ -48,12 +48,12 @@ typedef struct __attribute__((packed)) {
 } ActCmd;
 
 // ==== Ngưỡng ====
-const uint16_t TH_MQ4_ALERT       = 1400;
-const uint16_t TH_MQ4_EMERGENCY   = 1800;
-const uint16_t TH_MP2_ALERT       = 1200;
-const uint16_t TH_MP2_EMERGENCY   = 1600;
-const uint16_t TH_FLAME_ALERT     = 1000;
-const uint16_t TH_FLAME_EMERGENCY = 1300;
+const uint16_t TH_MQ4_ALERT       = 2250;
+const uint16_t TH_MQ4_EMERGENCY   = 2500;
+const uint16_t TH_MP2_ALERT       = 2500;
+const uint16_t TH_MP2_EMERGENCY   = 3500;
+//const uint16_t TH_FLAME_ALERT     = 1000;
+const uint16_t TH_FLAME_EMERGENCY = 1;
 
 // ==== State ====
 volatile bool   g_newData = false;
@@ -111,8 +111,8 @@ uint8_t decideLevel(const SensorPayload& p) {
                       (p.mp2 >= TH_MP2_EMERGENCY) ||
                       (p.flame >= TH_FLAME_EMERGENCY);
   bool anyAlert = (p.mq4 >= TH_MQ4_ALERT) ||
-                  (p.mp2 >= TH_MP2_ALERT) ||
-                  (p.flame >= TH_FLAME_ALERT);
+                  (p.mp2 >= TH_MP2_ALERT);
+                  
   if (anyEmergency) return 2;
   if (anyAlert)     return 1;
   return 0;

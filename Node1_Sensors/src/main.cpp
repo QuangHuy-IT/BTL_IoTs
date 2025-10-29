@@ -97,6 +97,7 @@ void addOrUpdatePeer() {
 }
 
 void setup() {
+  pinMode(FLAME_PIN, INPUT);
   Serial.begin(115200);
   delay(200);
 
@@ -141,5 +142,5 @@ void loop() {
 
   bool ok = sendWithAck(p);
   Serial.printf("[Sensor] seq=%lu | MQ4=%u | MP2=%u | FLAME=%u | send=%s\n",
-                (unsigned long)p.seq, p.mq4, p.mp2, p.flame ? 4095 : 0, ok ? "OK" : "RETRY_FAIL");
+                (unsigned long)p.seq, p.mq4, p.mp2, p.flame ? 1 : 0, ok ? "OK" : "RETRY_FAIL");
 }
