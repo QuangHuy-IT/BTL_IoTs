@@ -1,230 +1,249 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <esp_now.h>
+#include <WiFiClient.h>
 #include <PubSubClient.h>
-#include <ArduinoJson.h> // Thu vien de tao JSON
+#include <string.h>
 
-// ========== 1. THAY ĐỔI THÔNG SỐ ESP-NOW ==========
-// TODO: Thay dia chi MAC cua Node 2 (Actuator): 00:4B:12:EE:D5:30
-uint8_t actuatorAddress[] = {0x00, 0x4B, 0x12, 0xEE, 0xD5, 0x30};
+// ==== Cấu hình ESPNOW/Wi-Fi ====
+static const uint8_t ESPNOW_CHANNEL = 10;   // đồng bộ với AP của bạn
+static const int8_t  TX_POWER = 78;         // ~19.5 dBm
 
-// ========== 2. THAY ĐỔI THÔNG SỐ WI-FI ==========
-// TODO: Thay thong tin Wi-Fi cua ban
+// ==== WiFi & MQTT (ThingsBoard) ====
 const char* WIFI_SSID = "401 new";
-const char* WIFI_PASSWORD = "88969696";
+const char* WIFI_PASS = "88969696";
+const char* TB_HOST   = "demo.thingsboard.io"; 
+const uint16_t TB_PORT = 1883;
+const char* TB_TOKEN = "Fm9NAZ9CwuMvB4CvsOiS";
 
-// ========== 3. THAY ĐỔI THÔNG SỐ THINGSBOARD (MQTT) ==========
-// TODO: Thay thong tin server ThingBoard
-const char* TB_SERVER = "demo.thingsboard.io"; // Hoac IP/domain cua ban
-int TB_PORT = 1883;
-// TODO: Thay ACCESS TOKEN cua Device tren ThingBoard
-const char* TB_ACCESS_TOKEN = "Fm9NAZ9CwuMvB4CvsOiS";
+WiFiClient   net;
+PubSubClient mqtt(net);
 
-// ========== 4. THAY ĐỔI NGƯỠNG CẢNH BÁO ==========
-// TODO: Hieu chuan va dat nguong cho cam bien
-// Gia tri ADC tho tu 0-4095
-#define MQ4_THRESHOLD_GAS   2250  // Nguong bao dong GAS
-#define MP2_THRESHOLD_SMOKE 1200  // Nguong bao dong KHOI
+// ==== MAC peers ====
+// MAC Node 1: 44:1D:64:F7:4A:D8
+uint8_t sensorMac[]   = { 0x44, 0x1D, 0x64, 0xF7, 0x4A, 0xD8 };
+// MAC Node 2: 00:4B:12:EE:D5:30
+uint8_t actuatorMac[] = { 0x00, 0x4B, 0x12, 0xEE, 0xD5, 0x30 };
 
-// =========================================================
+// ==== Payloads ====
+typedef struct __attribute__((packed)) {
+  uint32_t seq;
+  uint16_t mq4;
+  uint16_t mp2;
+  uint16_t flame;
+  uint32_t ms;
+} SensorPayload;
 
-// Dinh nghia cau truc data NHAN (tu Node 1)
-typedef struct struct_message_sensor {
-    int mq4_value;
-    int mp2_value;
-    bool flame_detected;
-} struct_message_sensor;
-struct_message_sensor sensorData;
+typedef struct __attribute__((packed)) {
+  uint32_t seq;
+  uint8_t  ok;  // 1 = nhận OK
+} AckPayload;
 
-// Dinh nghia cau truc data GUI (den Node 2)
-typedef struct struct_command {
-    bool led_state;
-    bool buzzer_state;
-    bool relay_state;
-} struct_command;
-struct_command commandData;
+typedef struct __attribute__((packed)) {
+  uint8_t  level;    // 0=OFF, 1=Alert, 2=Emergency
+  uint16_t ms_on;
+  uint16_t ms_off;
+  uint16_t cycles;
+} ActCmd;
 
-// Bien co (flag) de bao hieu loop() co du lieu moi
-volatile bool newDataAvailable = false;
+// ==== Ngưỡng ====
+const uint16_t TH_MQ4_ALERT       = 2250;
+const uint16_t TH_MQ4_EMERGENCY   = 2500;
+const uint16_t TH_MP2_ALERT       = 2500;
+const uint16_t TH_MP2_EMERGENCY   = 3500;
+//const uint16_t TH_FLAME_ALERT     = 1000;
+const uint16_t TH_FLAME_EMERGENCY = 1;
 
-// Khoi tao MQTT
-WiFiClient espClient;
-PubSubClient client(espClient);
+// ==== State ====
+volatile bool   g_newData = false;
+SensorPayload   g_last{};
+uint32_t        g_recvCount = 0;
+uint32_t        g_lastRecvMs = 0;
 
-// Peer info (cho Node 2)
-esp_now_peer_info_t peerInfo;
+// ==== Peers ====
+esp_now_peer_info_t peerSensor{};
+esp_now_peer_info_t peerActuator{};
 
-// Callback khi NHAN data (tu Node 1)
-void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
-  memcpy(&sensorData, incomingData, sizeof(sensorData));
-  newDataAvailable = true; // Dat co bao hieu co du lieu moi
-  Serial.println("Nhan du lieu tu Node Cam Bien!");
+// ==== Utils ====
+String macToString(const uint8_t* mac) {
+  char buf[18];
+  sprintf(buf, "%02X:%02X:%02X:%02X:%02X:%02X",
+          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
 }
 
-// Callback khi GUI data (den Node 2)
-void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  Serial.print("Trang thai gui lenh den Node Actuator: ");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Thanh Cong" : "That Bai");
+void printSensorPayload(const SensorPayload& p, const char* prefix = "") {
+  Serial.printf("%sseq=%lu | MQ4=%u | MP2=%u | FLAME=%u | ms=%lu\n",
+                prefix, (unsigned long)p.seq, p.mq4, p.mp2, p.flame, (unsigned long)p.ms);
 }
 
-// Ham ket noi Wi-Fi
-void setup_wifi() {
-  delay(10);
-  Serial.println();
-  Serial.print("Dang ket noi Wi-Fi: ");
-  Serial.println(WIFI_SSID);
-
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("\nDa ket noi Wi-Fi!");
-  Serial.print("Dia chi IP: ");
-  Serial.println(WiFi.localIP());
-}
-
-// Ham ket noi lai MQTT
-void reconnect_mqtt() {
-  while (!client.connected()) {
-    Serial.print("Dang ket noi MQTT (ThingBoard)...");
-    // Ket noi voi username la Access Token
-    if (client.connect("ESP32_Coordinator_Gateway", TB_ACCESS_TOKEN, NULL)) {
-      Serial.println("Da ket noi!");
-      // Ban co the subscribe de nhan lenh tu ThingBoard o day (neu can)
-      // client.subscribe("v1/devices/me/rpc/request/+");
+// ==== MQTT ====
+void ensureMqtt() {
+  if (mqtt.connected()) return;
+  while (!mqtt.connected()) {
+    Serial.print("[MQTT] Connecting...");
+    if (mqtt.connect("esp32-coordinator", TB_TOKEN, nullptr)) {
+      Serial.println("connected.");
     } else {
-      Serial.print("That bai, rc=");
-      Serial.print(client.state());
-      Serial.println(" Thu lai sau 5 giay");
-      delay(5000);
+      Serial.printf("failed rc=%d, retry in 2s\n", mqtt.state());
+      delay(2000);
     }
   }
+}
+
+void publishTelemetry(const SensorPayload& p, const char* statusStr, uint8_t level) {
+  ensureMqtt();
+  String payload = "{";
+  payload += "\"seq\":"   + String(p.seq)   + ",";
+  payload += "\"mq4\":"   + String(p.mq4)   + ",";
+  payload += "\"mp2\":"   + String(p.mp2)   + ",";
+  payload += "\"flame\":" + String(p.flame) + ",";
+  payload += "\"status\":\"" + String(statusStr) + "\",";
+  payload += "\"level\":" + String(level);
+  payload += "}";
+  mqtt.publish("v1/devices/me/telemetry", payload.c_str());
+}
+
+// ==== Quyết định cấp độ ====
+uint8_t decideLevel(const SensorPayload& p) {
+  bool anyEmergency = (p.mq4 >= TH_MQ4_EMERGENCY) ||
+                      (p.mp2 >= TH_MP2_EMERGENCY) ||
+                      (p.flame >= TH_FLAME_EMERGENCY);
+  bool anyAlert = (p.mq4 >= TH_MQ4_ALERT) ||
+                  (p.mp2 >= TH_MP2_ALERT);
+                  
+  if (anyEmergency) return 2;
+  if (anyAlert)     return 1;
+  return 0;
+}
+
+// ==== Gửi lệnh Actuator ====
+void sendActuatorCmd(uint8_t level) {
+  ActCmd cmd{};
+  cmd.level = level;
+  if (level == 0) {
+    cmd.ms_on = cmd.ms_off = cmd.cycles = 0;
+  } else if (level == 1) {
+    cmd.ms_on = 200; cmd.ms_off = 800; cmd.cycles = 5;
+  } else {
+    cmd.ms_on = 200; cmd.ms_off = 200; cmd.cycles = 20;
+  }
+  esp_now_send(actuatorMac, (uint8_t*)&cmd, sizeof(cmd));
+}
+
+// ==== Trả ACK về Node 1 ====
+void sendAckToSensor(uint32_t seq) {
+  AckPayload ack{seq, 1};
+  esp_now_send(sensorMac, (uint8_t*)&ack, sizeof(ack));
+}
+
+// ==== Callbacks ====
+void onRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
+  // Chỉ xử lý gói từ sensor
+  if (memcmp(mac, sensorMac, 6) == 0 && len == sizeof(SensorPayload)) {
+    memcpy(&g_last, incomingData, sizeof(SensorPayload));
+    g_newData = true;
+    g_recvCount++;
+    g_lastRecvMs = millis();
+
+    // In ngay khi nhận + trả ACK
+    Serial.printf("\n[RX] from %s | len=%d | t=%lu ms\n",
+                  macToString(mac).c_str(), len, (unsigned long)g_lastRecvMs);
+    printSensorPayload(g_last, "  ");
+    sendAckToSensor(g_last.seq); // trả ACK ngay trong callback (nhanh, ngắn)
+  }
+}
+
+void onSent(const uint8_t* mac, esp_now_send_status_t status) {
+  // Log TX đến actuator hoặc khi gửi ACK
+  Serial.printf("[TX->%s] %s\n",
+                macToString(mac).c_str(),
+                status == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
+}
+
+// ==== ESP-NOW (sau khi Wi-Fi đã kết nối) ====
+void setupEspNow() {
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[ESP-NOW] init failed!");
+    while (1) delay(1000);
+  }
+  esp_now_register_recv_cb(onRecv);
+  esp_now_register_send_cb(onSent);
+
+  esp_now_del_peer(sensorMac);
+  memset(&peerSensor, 0, sizeof(peerSensor));
+  memcpy(peerSensor.peer_addr, sensorMac, 6);
+  peerSensor.channel = ESPNOW_CHANNEL;
+  peerSensor.encrypt = false;
+  peerSensor.ifidx   = WIFI_IF_STA;
+  esp_now_add_peer(&peerSensor);
+
+  esp_now_del_peer(actuatorMac);
+  memset(&peerActuator, 0, sizeof(peerActuator));
+  memcpy(peerActuator.peer_addr, actuatorMac, 6);
+  peerActuator.channel = ESPNOW_CHANNEL;
+  peerActuator.encrypt = false;
+  peerActuator.ifidx   = WIFI_IF_STA;
+  esp_now_add_peer(&peerActuator);
+
+  Serial.printf("[ESP-NOW] Peers added on CH=%u\n", ESPNOW_CHANNEL);
+}
+
+// ==== Wi-Fi + MQTT (trước ESP-NOW) ====
+void setupWiFiMqtt() {
+  WiFi.mode(WIFI_STA);
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  esp_wifi_set_max_tx_power(TX_POWER);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("[WiFi] Connecting");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(400);
+  }
+  Serial.printf("\n[WiFi] Connected %s | IP=%s | CH=%d | MAC=%s\n",
+                WIFI_SSID, WiFi.localIP().toString().c_str(),
+                WiFi.channel(), WiFi.macAddress().c_str());
+  if (WiFi.channel() != ESPNOW_CHANNEL) {
+    Serial.printf("[WARN] AP CH=%d khác ESPNOW_CH=%u. Hãy để AP ở kênh 10.\n",
+                  WiFi.channel(), ESPNOW_CHANNEL);
+  }
+  mqtt.setServer(TB_HOST, TB_PORT);
 }
 
 void setup() {
   Serial.begin(115200);
+  delay(200);
 
-  // 0) Đặt mode STA (rõ ràng) TRƯỚC khi làm gì thêm
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
+  // 1) Wi-Fi 
+  setupWiFiMqtt();
+  setupEspNow();
 
-  // 1) Kết nối Wi-Fi
-  setup_wifi();
-
-  // In thông tin để đối chiếu
-  Serial.print("STA MAC: "); Serial.println(WiFi.macAddress());     // dùng MAC này cho Node1
-  Serial.print("WiFi Channel: "); Serial.println(WiFi.channel());   // dùng kênh này cho Node1
-
-  // 2) MQTT
-  client.setServer(TB_SERVER, TB_PORT);
-  client.setBufferSize(1024);
-
-  // 3) ESP-NOW
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("Loi khoi tao ESP-NOW");
-    return;
-  }
-  esp_now_register_recv_cb(OnDataRecv);
-  esp_now_register_send_cb(OnDataSent);
-
-  // Peer tới Node2 (giữ nguyên)
-  memset(&peerInfo, 0, sizeof(peerInfo));
-  memcpy(peerInfo.peer_addr, actuatorAddress, 6);
-  peerInfo.ifidx = WIFI_IF_STA;
-  peerInfo.channel = 0;      // giữ 0 cũng được vì gửi từ “cùng kênh” STA
-  peerInfo.encrypt = false;
-  if (esp_now_add_peer(&peerInfo) != ESP_OK){
-    Serial.println("Loi them peer (Node 2)");
-    return;
-  }
-
-  Serial.println("Node Coordinator san sang hoat dong.");
-}
-
-// Ham xu ly logic chinh
-void processSensorData() {
-  Serial.println("Xu ly du lieu cam bien...");
-  
-  // Reset trang thai lenh
-  commandData.led_state = LOW;
-  commandData.buzzer_state = LOW;
-  commandData.relay_state = LOW; // Mac dinh la TAT
-
-  bool alert = false;
-  String alert_status = "BinhThuong";
-
-  // Logic canh bao
-  // Muc 3: KHAN CAP (Phat hien lua)
-  if (sensorData.flame_detected) {
-    Serial.println("!!! CANH BAO KHAN CAP: PHAT HIEN LUA !!!");
-    commandData.led_state = HIGH;
-    commandData.buzzer_state = HIGH;
-    commandData.relay_state = HIGH; // Kich hoat relay (ngat gas,...)
-    alert = true;
-    alert_status = "CHAY_KHANCAP";
-  }
-  // Muc 2: Canh bao Gas hoac Khoi
-  else if (sensorData.mq4_value > MQ4_THRESHOLD_GAS || sensorData.mp2_value > MP2_THRESHOLD_SMOKE) {
-    Serial.println("!! CANH BAO MUC 2: Phat hien KHOI hoac GAS !!");
-    commandData.led_state = HIGH;
-    commandData.buzzer_state = HIGH; // Co the cho coi keu ngat quang
-    commandData.relay_state = LOW;  // Chua can kich hoat relay
-    alert = true;
-    alert_status = "CANHBAO_KHOI_GAS";
-  }
-  // Muc 1: Binh thuong
-  else {
-    Serial.println("Trang thai: Binh thuong.");
-    // Tat ca da duoc dat ve LOW o tren
-  }
-
-  // 1. Gui lenh den Node 2 (Actuator) qua ESP-NOW
-  esp_now_send(actuatorAddress, (uint8_t *) &commandData, sizeof(commandData));
-
-  // 2. Chuan bi JSON va Gui du lieu len ThingBoard qua MQTT
-  // Dam bao client van dang ket noi
-  if (!client.connected()) {
-    reconnect_mqtt();
-  }
-  
-  // Tao payload JSON
-  StaticJsonDocument<200> jsonDoc;
-  jsonDoc["mq4"] = sensorData.mq4_value;
-  jsonDoc["mp2"] = sensorData.mp2_value;
-  jsonDoc["flame"] = sensorData.flame_detected;
-  jsonDoc["status"] = alert_status;
-
-  char jsonBuffer[512];
-  serializeJson(jsonDoc, jsonBuffer);
-
-  bool ok = client.publish("v1/devices/me/telemetry", jsonBuffer);
-  Serial.print("Da gui len ThingBoard: "); Serial.println(jsonBuffer);
-  Serial.print("Publish result: "); Serial.println(ok ? "OK" : "FAIL");
-  Serial.print("MQTT state: "); Serial.println(client.state());
-
+  Serial.printf("[Coordinator] Ready. WiFiCH=%d | ESPNOW_CH=%u\n",
+                WiFi.channel(), ESPNOW_CHANNEL);
 }
 
 void loop() {
-  // Luon duy tri ket noi MQTT
+  if (g_newData) {
+    noInterrupts();
+    SensorPayload p = g_last;
+    g_newData = false;
+    interrupts();
+
+    uint8_t level = decideLevel(p);
+    const char* statusStr = (level == 0) ? "BinhThuong" :
+                            (level == 1) ? "CanhBao" : "KhanCap";
+
+    Serial.printf("[PROC] seq=%lu -> level=%u (%s)\n",
+                  (unsigned long)p.seq, level, statusStr);
+
+    sendActuatorCmd(level);
+    publishTelemetry(p, statusStr, level);
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
-    if (!client.connected()) {
-      reconnect_mqtt();
-    }
-    client.loop(); // Rat quan trong, de duy tri ket noi MQTT
-  } else {
-    Serial.println("Mat ket noi Wi-Fi, dang thu ket noi lai...");
-    setup_wifi();
+    ensureMqtt();
+    mqtt.loop();
   }
-
-  // Kiem tra co (flag) xem co du lieu moi tu Node 1 khong
-  if (newDataAvailable) {
-    newDataAvailable = false; // Reset co
-    processSensorData();      // Xu ly du lieu
-  }
-
-  // Khong nen delay() qua lau trong loop() nay
-  delay(100); 
+  delay(5);
 }
