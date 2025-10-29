@@ -1,103 +1,145 @@
 #include <Arduino.h>
-#include <esp_now.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <esp_now.h>
+#include <string.h>
 
-// ========== THAY ĐỔI THÔNG SỐ ==========
-// TODO: Thay dia chi MAC cua Node 3 (Coordinator) :88:57:21:E0:77:18
-uint8_t coordinatorAddress[] = {0x88, 0x57, 0x21, 0xE0, 0x77, 0x18};
+// ==== Cấu hình kênh & radio ====
+static const uint8_t ESPNOW_CHANNEL = 10;    // khớp với AP của Node 3
+static const int8_t  TX_POWER = 78;          // ~19.5 dBm (đơn vị: 0.25 dBm)
 
-// TODO: Dinh nghia cac chan GPIO cam bien
-#define MQ4_PIN      35  // Chan Analog
-#define MP2_PIN      32  // Chan Analog
-#define FLAME_PIN    34  // Chan Digital
+// ==== PINS ====
+#define MQ4_PIN   35   // ADC
+#define MP2_PIN   32   // ADC
+#define FLAME_PIN 34   // ADC (nếu module Flame analog)
 
-// Dinh nghia cau truc data de gui di
-typedef struct struct_message {
-    int mq4_value;
-    int mp2_value;
-    bool flame_detected;
-} struct_message;
+// ==== MAC của Node 3 (STA MAC) ====
+uint8_t coordinatorMac[] = { 0x88, 0x57, 0x21, 0xE0, 0x77, 0x18 }; 
 
-// Tao mot bien struct
-struct_message sensorData;
+// ==== Giao thức ứng dụng ====
+// Gói sensor (có seq)
+typedef struct __attribute__((packed)) {
+  uint32_t seq;
+  uint16_t mq4;
+  uint16_t mp2;
+  uint16_t flame;
+  uint32_t ms;
+} SensorPayload;
 
-// Callback function khi data duoc gui
-void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  Serial.print("\r\nTrang thai gui goi tin cuoi: ");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Thanh Cong" : "That Bai");
+// Gói ACK từ Node 3 trả về
+typedef struct __attribute__((packed)) {
+  uint32_t seq;
+  uint8_t  ok;  // 1 = nhận OK
+} AckPayload;
+
+// ==== Tham số retry/timeout ====
+static const uint8_t  MAX_RETRY       = 5;
+static const uint32_t ACK_TIMEOUT_MS  = 120;   // chờ ACK mỗi lần gửi
+static const uint32_t SEND_PERIOD_MS  = 1000;  // tần suất gửi dữ liệu
+
+// ==== Biến toàn cục ====
+esp_now_peer_info_t peer{};
+volatile bool ackReceived = false;
+volatile uint32_t ackSeq  = 0;
+uint32_t seqCounter = 0;
+uint32_t lastSendMs = 0;
+
+void onSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  // chỉ log trạng thái TX của lớp MAC (không phải ACK ứng dụng)
+  // Serial.printf("[Sensor] TX status: %s\n", status == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
 }
 
-// --- Khai báo hằng kênh của Node3
-#define ESPNOW_CHANNEL  10 
+void onRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
+  if (len == sizeof(AckPayload)) {
+    AckPayload ack;
+    memcpy(&ack, incomingData, sizeof(ack));
+    if (ack.ok == 1) {
+      ackSeq = ack.seq;
+      ackReceived = true;
+    }
+  }
+}
 
-// Peer info
-esp_now_peer_info_t peerInfo = {};  // KHỞI TẠO ZERO
+bool sendWithAck(const SensorPayload &p) {
+  // Gửi gói và chờ ACK đúng seq trong thời gian ACK_TIMEOUT_MS, lặp lại tối đa MAX_RETRY
+  for (uint8_t attempt = 0; attempt <= MAX_RETRY; ++attempt) {
+    ackReceived = false;
+
+    esp_err_t err = esp_now_send(coordinatorMac, (uint8_t*)&p, sizeof(p));
+    if (err != ESP_OK) {
+      Serial.printf("[Sensor] esp_now_send err=%d (attempt %u)\n", err, attempt);
+    }
+
+    uint32_t t0 = millis();
+    while (millis() - t0 < ACK_TIMEOUT_MS) {
+      if (ackReceived && ackSeq == p.seq) {
+        // Nhận đúng ACK cho seq này
+        return true;
+      }
+      delay(1); // nhường CPU
+    }
+    // Hết timeout -> retry
+  }
+  return false;
+}
+
+void addOrUpdatePeer() {
+  esp_now_del_peer(coordinatorMac);
+  memset(&peer, 0, sizeof(peer));
+  memcpy(peer.peer_addr, coordinatorMac, 6);
+  peer.channel = ESPNOW_CHANNEL;         
+  peer.encrypt = false;
+  peer.ifidx   = WIFI_IF_STA;            // rõ ràng interface STA
+  if (esp_now_add_peer(&peer) != ESP_OK) {
+    Serial.println("[Sensor] Failed to add peer!");
+    while (1) delay(1000);
+  }
+}
 
 void setup() {
   Serial.begin(115200);
+  delay(200);
 
-  pinMode(MQ4_PIN, INPUT);
-  pinMode(MP2_PIN, INPUT);
-  pinMode(FLAME_PIN, INPUT);
-
-  // 1) Đặt STA mode
   WiFi.mode(WIFI_STA);
-
-  // 2) ***ÉP KÊNH CHO RADIO*** để trùng kênh Node3
-  esp_wifi_set_promiscuous(true); // bắt buộc trước khi set channel
-  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
-  esp_wifi_set_promiscuous(false);
-
-  // 3) ESP-NOW
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("Loi khoi tao ESP-NOW");
-    return;
-  }
-
-  esp_now_register_send_cb(OnDataSent);
-
-  // 4) Thêm peer là Node3 (MAC dạng STA MAC in từ Node3)
-  memset(&peerInfo, 0, sizeof(peerInfo));
-  memcpy(peerInfo.peer_addr, coordinatorAddress, 6);
-  peerInfo.ifidx = WIFI_IF_STA;
-  peerInfo.channel = ESPNOW_CHANNEL; // đặt đúng kênh
-  peerInfo.encrypt = false;
-
-  if (esp_now_add_peer(&peerInfo) != ESP_OK){
-    Serial.println("Loi them peer (Node 3)");
-    return;
-  }
-}
-
-// Ham doc cam bien (Ban nen thuc hien hieu chuan o day)
-void readSensors() {
-  // Doc gia tri tho tu ADC (0-4095)
-  sensorData.mq4_value = analogRead(MQ4_PIN);
-  sensorData.mp2_value = analogRead(MP2_PIN);
-
-  // Cam bien lua thuong la digital (0 = Phat hien lua, 1 = Binh thuong)
-  // TODO: Kiem tra lai logic cua cam bien lua ban dang dung
-  sensorData.flame_detected = (digitalRead(FLAME_PIN) == LOW); 
-
-  Serial.printf("Dang doc: MQ4 = %d | MP2 = %d | Lua = %s\n", 
-                sensorData.mq4_value, 
-                sensorData.mp2_value, 
-                sensorData.flame_detected ? "PHAT HIEN" : "Binh thuong");
-}
-
-void loop() { 
-  // 1. Doc du lieu tu cam bien
-  readSensors();
-
-  // 2. Gui du lieu den Node 3 (Coordinator)
-  esp_err_t result = esp_now_send(coordinatorAddress, (uint8_t *) &sensorData, sizeof(sensorData));
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  esp_wifi_set_max_tx_power(TX_POWER);   // tăng công suất phát
   
-  if (result == ESP_OK) {
-    Serial.println("Da gui du lieu den Coordinator");
-  } else {
-    Serial.println("Loi khi gui du lieu");
+
+  // Ép STA về kênh 10 trước khi init ESP-NOW
+  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  Serial.printf("[Sensor] MAC=%s | Forced CH=%d\n",
+                WiFi.macAddress().c_str(), ESPNOW_CHANNEL);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[Sensor] ESP-NOW init failed!");
+    while (1) delay(1000);
   }
 
-  delay(1000); // Gui du lieu moi 1 giay
+  esp_now_register_send_cb(onSent);
+  esp_now_register_recv_cb(onRecv); // để nhận ACK
+
+  addOrUpdatePeer();
+
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+}
+
+void loop() {
+  uint32_t now = millis();
+  if (now - lastSendMs < SEND_PERIOD_MS) {
+    delay(1);
+    return;
+  }
+  lastSendMs = now;
+
+  SensorPayload p;
+  p.seq   = ++seqCounter;
+  p.mq4   = analogRead(MQ4_PIN);
+  p.mp2   = analogRead(MP2_PIN);
+  p.flame = (digitalRead(FLAME_PIN) == LOW);
+  p.ms    = now;
+
+  bool ok = sendWithAck(p);
+  Serial.printf("[Sensor] seq=%lu | MQ4=%u | MP2=%u | FLAME=%u | send=%s\n",
+                (unsigned long)p.seq, p.mq4, p.mp2, p.flame ? 4095 : 0, ok ? "OK" : "RETRY_FAIL");
 }
