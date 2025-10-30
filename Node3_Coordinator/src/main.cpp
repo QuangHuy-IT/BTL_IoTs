@@ -7,12 +7,12 @@
 #include <string.h>
 
 // ==== Cấu hình ESPNOW/Wi-Fi ====
-static const uint8_t ESPNOW_CHANNEL = 10;   // đồng bộ với AP của bạn
+static const uint8_t ESPNOW_CHANNEL = 6;   // đồng bộ với AP của bạn
 static const int8_t  TX_POWER = 78;         // ~19.5 dBm
 
 // ==== WiFi & MQTT (ThingsBoard) ====
-const char* WIFI_SSID = "401 new";
-const char* WIFI_PASS = "88969696";
+const char* WIFI_SSID = "Huydayne";
+const char* WIFI_PASS = "12345687";
 const char* TB_HOST   = "demo.thingsboard.io"; 
 const uint16_t TB_PORT = 1883;
 const char* TB_TOKEN = "Fm9NAZ9CwuMvB4CvsOiS";

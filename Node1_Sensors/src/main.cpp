@@ -5,7 +5,7 @@
 #include <string.h>
 
 // ==== Cấu hình kênh & radio ====
-static const uint8_t ESPNOW_CHANNEL = 10;    // khớp với AP của Node 3
+static const uint8_t ESPNOW_CHANNEL = 6;    // khớp với AP của Node 3
 static const int8_t  TX_POWER = 78;          // ~19.5 dBm (đơn vị: 0.25 dBm)
 
 // ==== PINS ====
