@@ -7,12 +7,12 @@
 #include <string.h>
 
 // ==== Cấu hình ESPNOW/Wi-Fi ====
-static const uint8_t ESPNOW_CHANNEL = 6;   // đồng bộ với AP của bạn
+static const uint8_t ESPNOW_CHANNEL = 10;   // đồng bộ với AP của bạn
 static const int8_t  TX_POWER = 78;         // ~19.5 dBm
 
 // ==== WiFi & MQTT (ThingsBoard) ====
-const char* WIFI_SSID = "Huydayne";
-const char* WIFI_PASS = "12345687";
+const char* WIFI_SSID = "401 new";
+const char* WIFI_PASS = "88969696";
 const char* TB_HOST   = "demo.thingsboard.io"; 
 const uint16_t TB_PORT = 1883;
 const char* TB_TOKEN = "Fm9NAZ9CwuMvB4CvsOiS";
@@ -48,10 +48,10 @@ typedef struct __attribute__((packed)) {
 } ActCmd;
 
 // ==== Ngưỡng ====
-const uint16_t TH_MQ4_ALERT       = 2250;
-const uint16_t TH_MQ4_EMERGENCY   = 2500;
+const uint16_t TH_MQ4_ALERT       = 1900;
+const uint16_t TH_MQ4_EMERGENCY   = 2100;
 const uint16_t TH_MP2_ALERT       = 2500;
-const uint16_t TH_MP2_EMERGENCY   = 3500;
+const uint16_t TH_MP2_EMERGENCY   = 3800;
 //const uint16_t TH_FLAME_ALERT     = 1000;
 const uint16_t TH_FLAME_EMERGENCY = 1;
 
@@ -231,8 +231,22 @@ void loop() {
     interrupts();
 
     uint8_t level = decideLevel(p);
-    const char* statusStr = (level == 0) ? "BinhThuong" :
-                            (level == 1) ? "CanhBao" : "KhanCap";
+
+    // Xác định nguyên nhân để đặt status cụ thể
+    bool gasAlert    = (p.mq4 >= TH_MQ4_ALERT);
+    bool gasEmer     = (p.mq4 >= TH_MQ4_EMERGENCY);
+    bool smokeAlert  = (p.mp2 >= TH_MP2_ALERT);
+    bool smokeEmer   = (p.mp2 >= TH_MP2_EMERGENCY);
+    bool flameEmer   = (p.flame >= TH_FLAME_EMERGENCY);
+
+    const char* statusStr = "BinhThuong";
+    if (flameEmer) {
+      statusStr = "BaoChayKhanCap"; // lửa ưu tiên cao nhất
+    } else if (gasEmer || gasAlert) {
+      statusStr = (level == 1) ? "CanhBaoGas" : "KhanCapGas";
+    } else if (smokeEmer || smokeAlert) {
+      statusStr = (level == 1) ? "CanhBaoKhoi" : "KhanCapKhoi";
+    }
 
     Serial.printf("[PROC] seq=%lu -> level=%u (%s)\n",
                   (unsigned long)p.seq, level, statusStr);
