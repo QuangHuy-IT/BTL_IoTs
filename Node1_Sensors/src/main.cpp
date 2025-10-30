@@ -5,13 +5,13 @@
 #include <string.h>
 
 // ==== Cấu hình kênh & radio ====
-static const uint8_t ESPNOW_CHANNEL = 10;    // khớp với AP của Node 3
-static const int8_t  TX_POWER = 78;          // ~19.5 dBm (đơn vị: 0.25 dBm)
+static const uint8_t ESPNOW_CHANNEL = 10;    
+static const int8_t  TX_POWER = 78;         
 
 // ==== PINS ====
-#define MQ4_PIN   35   // ADC
-#define MP2_PIN   32   // ADC
-#define FLAME_PIN 34   // ADC (nếu module Flame analog)
+#define MQ4_PIN   35   //ADC
+#define MP2_PIN   32   //ADC
+#define FLAME_PIN 34   //ADC
 
 // ==== MAC của Node 3 (STA MAC) ====
 uint8_t coordinatorMac[] = { 0x88, 0x57, 0x21, 0xE0, 0x77, 0x18 }; 
@@ -29,7 +29,7 @@ typedef struct __attribute__((packed)) {
 // Gói ACK từ Node 3 trả về
 typedef struct __attribute__((packed)) {
   uint32_t seq;
-  uint8_t  ok;  // 1 = nhận OK
+  uint8_t  ok;
 } AckPayload;
 
 // ==== Tham số retry/timeout ====
@@ -44,7 +44,7 @@ volatile uint32_t ackSeq  = 0;
 uint32_t seqCounter = 0;
 uint32_t lastSendMs = 0;
 
-void onSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+ void onSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   // chỉ log trạng thái TX của lớp MAC (không phải ACK ứng dụng)
   // Serial.printf("[Sensor] TX status: %s\n", status == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
 }
@@ -76,7 +76,7 @@ bool sendWithAck(const SensorPayload &p) {
         // Nhận đúng ACK cho seq này
         return true;
       }
-      delay(1); // nhường CPU
+      delay(1); 
     }
     // Hết timeout -> retry
   }
@@ -106,7 +106,7 @@ void setup() {
   esp_wifi_set_max_tx_power(TX_POWER);   // tăng công suất phát
   
 
-  // Ép STA về kênh 10 trước khi init ESP-NOW
+  // Ép STA về kênh khởi tạo
   esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
   Serial.printf("[Sensor] MAC=%s | Forced CH=%d\n",
                 WiFi.macAddress().c_str(), ESPNOW_CHANNEL);

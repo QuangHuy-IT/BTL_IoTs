@@ -5,14 +5,15 @@
 #include <WiFiClient.h>
 #include <PubSubClient.h>
 #include <string.h>
+#include <ArduinoJson.h>
 
 // ==== Cấu hình ESPNOW/Wi-Fi ====
 static const uint8_t ESPNOW_CHANNEL = 10;   // đồng bộ với AP của bạn
 static const int8_t  TX_POWER = 78;         // ~19.5 dBm
 
 // ==== WiFi & MQTT (ThingsBoard) ====
-const char* WIFI_SSID = "401 new";
-const char* WIFI_PASS = "88969696";
+const char* WIFI_SSID = "IphoneHuy";
+const char* WIFI_PASS = "hihihihi12";
 const char* TB_HOST   = "demo.thingsboard.io"; 
 const uint16_t TB_PORT = 1883;
 const char* TB_TOKEN = "Fm9NAZ9CwuMvB4CvsOiS";
@@ -61,6 +62,12 @@ SensorPayload   g_last{};
 uint32_t        g_recvCount = 0;
 uint32_t        g_lastRecvMs = 0;
 
+// Track offline/online for ESPNOW channel control
+bool            g_offlineChanForced = false;  // đã ép kênh khi đang offline chưa?
+
+// ==== Mute window ====
+unsigned long   g_muteUntilMs = 0;   // 0 = không mute; > millis() = đang mute
+
 // ==== Peers ====
 esp_now_peer_info_t peerSensor{};
 esp_now_peer_info_t peerActuator{};
@@ -85,6 +92,7 @@ void ensureMqtt() {
     Serial.print("[MQTT] Connecting...");
     if (mqtt.connect("esp32-coordinator", TB_TOKEN, nullptr)) {
       Serial.println("connected.");
+      mqtt.subscribe("v1/devices/me/rpc/request/+");
     } else {
       Serial.printf("failed rc=%d, retry in 2s\n", mqtt.state());
       delay(2000);
@@ -93,6 +101,10 @@ void ensureMqtt() {
 }
 
 void publishTelemetry(const SensorPayload& p, const char* statusStr, uint8_t level) {
+  // Đừng chặn vòng lặp khi mất Wi-Fi: chỉ publish khi còn kết nối
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
   ensureMqtt();
   String payload = "{";
   payload += "\"seq\":"   + String(p.seq)   + ",";
@@ -103,19 +115,6 @@ void publishTelemetry(const SensorPayload& p, const char* statusStr, uint8_t lev
   payload += "\"level\":" + String(level);
   payload += "}";
   mqtt.publish("v1/devices/me/telemetry", payload.c_str());
-}
-
-// ==== Quyết định cấp độ ====
-uint8_t decideLevel(const SensorPayload& p) {
-  bool anyEmergency = (p.mq4 >= TH_MQ4_EMERGENCY) ||
-                      (p.mp2 >= TH_MP2_EMERGENCY) ||
-                      (p.flame >= TH_FLAME_EMERGENCY);
-  bool anyAlert = (p.mq4 >= TH_MQ4_ALERT) ||
-                  (p.mp2 >= TH_MP2_ALERT);
-                  
-  if (anyEmergency) return 2;
-  if (anyAlert)     return 1;
-  return 0;
 }
 
 // ==== Gửi lệnh Actuator ====
@@ -131,6 +130,98 @@ void sendActuatorCmd(uint8_t level) {
   }
   esp_now_send(actuatorMac, (uint8_t*)&cmd, sizeof(cmd));
 }
+
+// Callback nhận mọi gói MQTT đã subscribe
+void mqttCallback(char* topic, byte* payload, unsigned int len) {
+  // Chỉ quan tâm RPC: v1/devices/me/rpc/request/+
+  const char* prefix = "v1/devices/me/rpc/request/";
+  const size_t L = strlen(prefix);
+  if (strncmp(topic, prefix, L) != 0) return;
+
+  const char* reqId = topic + L;
+
+  // Parse JSON RPC
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, payload, len);
+  if (err) {
+    Serial.printf("[RPC] JSON parse error: %s\n", err.c_str());
+    return;
+  }
+
+  const char* method = doc["method"] | "";
+  JsonVariant params = doc["params"]; // có thể là {}
+
+  if (strcmp(method, "mute") == 0) {
+    // 1) Tắt ngay actuator
+    sendActuatorCmd(0);        // level=0 => Node2 tắt LED + buzzer ngay
+
+    // 2) Đặt cửa sổ mute 30s (ưu tiên params.minutes nếu có)
+    int minutes = 0;
+    int seconds = 30;          // mặc định 30s
+
+    if (params.is<JsonObject>()) {
+      if (params.containsKey("minutes")) minutes = params["minutes"].as<int>();
+      if (params.containsKey("seconds")) seconds = params["seconds"].as<int>();
+    }
+
+    unsigned long durMs = 0;
+    if (minutes > 0) durMs += (unsigned long)minutes * 60UL * 1000UL;
+    if (seconds > 0) durMs += (unsigned long)seconds * 1000UL;
+    if (durMs == 0) durMs = 30000UL; // fallback 30s
+
+    g_muteUntilMs = millis() + durMs;
+
+    // 3) (tuỳ chọn) báo về TB đã nhận
+    StaticJsonDocument<64> rsp;
+    rsp["ok"] = true;
+    char buf[64];
+    size_t n = serializeJson(rsp, buf, sizeof(buf));
+    String respTopic = String("v1/devices/me/rpc/response/") + reqId;
+    mqtt.publish(respTopic.c_str(), buf, n);
+
+    Serial.printf("[RPC] mute accepted: %lu ms\n", (unsigned long)durMs);
+  }
+  else if (strcmp(method, "unmute") == 0) {
+    g_muteUntilMs = 0;
+    sendActuatorCmd(0); // đảm bảo đang im lặng
+
+    StaticJsonDocument<64> rsp;
+    rsp["ok"] = true;
+    char buf[64];
+    size_t n = serializeJson(rsp, buf, sizeof(buf));
+    String respTopic = String("v1/devices/me/rpc/response/") + reqId;
+    mqtt.publish(respTopic.c_str(), buf, n);
+
+    Serial.println("[RPC] unmute accepted");
+  }
+  else {
+    // Method khác: trả lời lỗi
+    StaticJsonDocument<64> rsp;
+    rsp["ok"] = false;
+    rsp["err"] = "unknown_method";
+    char buf[96];
+    size_t n = serializeJson(rsp, buf, sizeof(buf));
+    String respTopic = String("v1/devices/me/rpc/response/") + reqId;
+    mqtt.publish(respTopic.c_str(), buf, n);
+
+    Serial.printf("[RPC] unknown method: %s\n", method);
+  }
+}
+
+
+// ==== Quyết định cấp độ ====
+uint8_t decideLevel(const SensorPayload& p) {
+  bool anyEmergency = (p.mq4 >= TH_MQ4_EMERGENCY) ||
+                      (p.mp2 >= TH_MP2_EMERGENCY) ||
+                      (p.flame >= TH_FLAME_EMERGENCY);
+  bool anyAlert = (p.mq4 >= TH_MQ4_ALERT) ||
+                  (p.mp2 >= TH_MP2_ALERT);
+                  
+  if (anyEmergency) return 2;
+  if (anyAlert)     return 1;
+  return 0;
+}
+
 
 // ==== Trả ACK về Node 1 ====
 void sendAckToSensor(uint32_t seq) {
@@ -197,18 +288,33 @@ void setupWiFiMqtt() {
   esp_wifi_set_max_tx_power(TX_POWER);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("[WiFi] Connecting");
-  while (WiFi.status() != WL_CONNECTED) {
+  unsigned long t0 = millis();
+  const unsigned long CONNECT_TIMEOUT_MS = 8000; // 8s cho phép rơi về chế độ offline
+  while (WiFi.status() != WL_CONNECTED && (millis() - t0) < CONNECT_TIMEOUT_MS) {
     Serial.print(".");
-    delay(400);
+    delay(300);
   }
-  Serial.printf("\n[WiFi] Connected %s | IP=%s | CH=%d | MAC=%s\n",
-                WIFI_SSID, WiFi.localIP().toString().c_str(),
-                WiFi.channel(), WiFi.macAddress().c_str());
-  if (WiFi.channel() != ESPNOW_CHANNEL) {
-    Serial.printf("[WARN] AP CH=%d khác ESPNOW_CH=%u. Hãy để AP ở kênh 10.\n",
-                  WiFi.channel(), ESPNOW_CHANNEL);
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("\n[WiFi] Connected %s | IP=%s | CH=%d | MAC=%s\n",
+                  WIFI_SSID, WiFi.localIP().toString().c_str(),
+                  WiFi.channel(), WiFi.macAddress().c_str());
+    g_offlineChanForced = false; // đang online -> không ép kênh
+    if (WiFi.channel() != ESPNOW_CHANNEL) {
+      Serial.printf("[WARN] AP CH=%d khác ESPNOW_CH=%u. Hãy để AP ở kênh 10.\n",
+                    WiFi.channel(), ESPNOW_CHANNEL);
+    }
+  } else {
+    Serial.println("\n[WiFi] Not connected -> OFFLINE mode for ESP-NOW");
+    // Khi offline, ép kênh ESPNOW cố định để giao tiếp với Node1/Node2
+    if (esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE) == ESP_OK) {
+      g_offlineChanForced = true;
+      Serial.printf("[WiFi] Forced ESP-NOW channel to %u (offline)\n", ESPNOW_CHANNEL);
+    } else {
+      Serial.println("[WiFi] Failed to force channel");
+    }
   }
   mqtt.setServer(TB_HOST, TB_PORT);
+  mqtt.setCallback(mqttCallback);
 }
 
 void setup() {
@@ -224,6 +330,22 @@ void setup() {
 }
 
 void loop() {
+  // Fallback an toàn: nếu mất Wi-Fi sau khi đã chạy, ép lại kênh ESPNOW để Node2 vẫn nhận lệnh
+  if (WiFi.status() != WL_CONNECTED) {
+    if (!g_offlineChanForced) {
+      if (esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE) == ESP_OK) {
+        g_offlineChanForced = true;
+        Serial.printf("[WiFi] Lost connection -> force ESP-NOW CH=%u\n", ESPNOW_CHANNEL);
+      }
+    }
+  } else {
+    // Khi đã online, bỏ cờ (không cần ép kênh, theo kênh AP)
+    if (g_offlineChanForced) {
+      g_offlineChanForced = false;
+      Serial.printf("[WiFi] Back online on CH=%d\n", WiFi.channel());
+    }
+  }
+
   if (g_newData) {
     noInterrupts();
     SensorPayload p = g_last;
@@ -248,10 +370,21 @@ void loop() {
       statusStr = (level == 1) ? "CanhBaoKhoi" : "KhanCapKhoi";
     }
 
+    // --- CƯỠNG CHẾ MUTE: nếu đang trong cửa sổ mute, không cho hú còi ---
+    uint8_t actuatorLevel = level; // mặc định: bằng level thật
+    if (g_muteUntilMs != 0) {
+      long remain = (long)(g_muteUntilMs - millis());
+      if (remain > 0) {
+        actuatorLevel = 0; // ép không hú còi/đèn trong khoảng mute
+      } else {
+        g_muteUntilMs = 0; // hết mute
+      }
+    }
+
     Serial.printf("[PROC] seq=%lu -> level=%u (%s)\n",
                   (unsigned long)p.seq, level, statusStr);
 
-    sendActuatorCmd(level);
+    sendActuatorCmd(actuatorLevel);
     publishTelemetry(p, statusStr, level);
   }
 
