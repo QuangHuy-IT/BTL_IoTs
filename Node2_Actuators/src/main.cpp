@@ -6,11 +6,18 @@
 #include <string.h>
 
 // ========= CONFIG =========
-static const uint8_t ESPNOW_CHANNEL = 10;   // Kênh phải giống Node 1 & Node 3
+static const uint8_t ESPNOW_CHANNEL = 10;   
 
 // ========= PIN ============
 #define LED_PIN     4
 #define BUZZER_PIN  18
+
+// ==== PWM cho BUZZER ====
+#define BUZZER_CH   0
+#define BUZZER_FREQ 2000   // 2kHz: thường hợp với buzzer 
+#define BUZZER_RES  8      // 8-bit duty
+inline void buzzerOn(uint8_t duty = 128) { ledcWrite(BUZZER_CH, duty); } // ~50%
+inline void buzzerOff() { ledcWrite(BUZZER_CH, 0); }
 
 // ========= STRUCT =========
 typedef struct __attribute__((packed)) {
@@ -21,7 +28,7 @@ typedef struct __attribute__((packed)) {
 } ActCmd;
 
 // ========= STATE ==========
-volatile bool cmdReady = false; // chỉ flag là volatile
+volatile bool cmdReady = false; 
 ActCmd g_cmd;                   
 
 // In MAC dạng chuỗi
@@ -52,13 +59,15 @@ void onSent(const uint8_t *mac, esp_now_send_status_t status) {
                 status == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
 }
 
-void doPattern(uint16_t onMs, uint16_t offMs, uint16_t cycles, bool buzzer) {
+void doPattern(uint16_t onMs, uint16_t offMs, uint16_t cycles, bool buzzer)
+{
   for (uint16_t i = 0; i < cycles; i++) {
     digitalWrite(LED_PIN, HIGH);
-    if (buzzer) digitalWrite(BUZZER_PIN, HIGH);
+    if (buzzer) buzzerOn();          // PWM kêu to, rõ
     delay(onMs);
+
     digitalWrite(LED_PIN, LOW);
-    if (buzzer) digitalWrite(BUZZER_PIN, LOW);
+    if (buzzer) buzzerOff();         // tắt giữa các nhịp
     delay(offMs);
   }
 }
@@ -71,6 +80,11 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   digitalWrite(BUZZER_PIN, LOW);
+
+  
+  ledcSetup(BUZZER_CH, BUZZER_FREQ, BUZZER_RES);
+  ledcAttachPin(BUZZER_PIN, BUZZER_CH);
+  buzzerOff();
 
   WiFi.mode(WIFI_STA);
   esp_wifi_set_ps(WIFI_PS_NONE);
@@ -101,13 +115,15 @@ void loop() {
 
     if (cmd.level == 0) {
       digitalWrite(LED_PIN, LOW);
-      digitalWrite(BUZZER_PIN, LOW);
+      buzzerOff();                                  // đảm bảo tắt hẳn
     } else if (cmd.level == 1) {
-      // Cảnh báo nhẹ → chỉ LED
-      doPattern(cmd.ms_on, cmd.ms_off, cmd.cycles, false);
-    } else if (cmd.level == 2) {
-      // Khẩn cấp → LED + Buzzer
+      // Cảnh báo nhẹ: LED nháy theo nhịp, CÒI KÊU THEO NHỊP
       doPattern(cmd.ms_on, cmd.ms_off, cmd.cycles, true);
+    } else if (cmd.level == 2) {
+      // Khẩn cấp: LED nháy theo nhịp, CÒI KÊU LIÊN TỤC (PWM)
+      buzzerOn();                                  // bật liên tục
+      doPattern(cmd.ms_on, cmd.ms_off, cmd.cycles, false);  // chỉ nháy LED
+      // KHÔNG buzzerOff() ở đây -> sẽ kêu liên tục đến khi nhận level=0
     }
   }
   delay(5);
