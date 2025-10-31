@@ -6,7 +6,7 @@
 #include <string.h>
 
 // ========= CONFIG =========
-static const uint8_t ESPNOW_CHANNEL = 10;   // Kênh phải giống Node 1 & Node 3
+static const uint8_t ESPNOW_CHANNEL = 10;   
 
 // ========= PIN ============
 #define LED_PIN     4
@@ -14,7 +14,7 @@ static const uint8_t ESPNOW_CHANNEL = 10;   // Kênh phải giống Node 1 & Nod
 
 // ==== PWM cho BUZZER ====
 #define BUZZER_CH   0
-#define BUZZER_FREQ 2000   // 2kHz: thường hợp với buzzer piezo
+#define BUZZER_FREQ 2000   // 2kHz: thường hợp với buzzer 
 #define BUZZER_RES  8      // 8-bit duty
 inline void buzzerOn(uint8_t duty = 128) { ledcWrite(BUZZER_CH, duty); } // ~50%
 inline void buzzerOff() { ledcWrite(BUZZER_CH, 0); }
@@ -28,7 +28,7 @@ typedef struct __attribute__((packed)) {
 } ActCmd;
 
 // ========= STATE ==========
-volatile bool cmdReady = false; // chỉ flag là volatile
+volatile bool cmdReady = false; 
 ActCmd g_cmd;                   
 
 // In MAC dạng chuỗi
@@ -81,7 +81,7 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
   digitalWrite(BUZZER_PIN, LOW);
 
-  // --- THÊM 3 DÒNG NÀY ---
+  
   ledcSetup(BUZZER_CH, BUZZER_FREQ, BUZZER_RES);
   ledcAttachPin(BUZZER_PIN, BUZZER_CH);
   buzzerOff();
@@ -117,7 +117,7 @@ void loop() {
       digitalWrite(LED_PIN, LOW);
       buzzerOff();                                  // đảm bảo tắt hẳn
     } else if (cmd.level == 1) {
-      // Cảnh báo nhẹ: nếu bạn muốn còi NGẮT QUÃNG, đổi 'false' -> 'true'
+      // Cảnh báo nhẹ: LED nháy theo nhịp, CÒI KÊU THEO NHỊP
       doPattern(cmd.ms_on, cmd.ms_off, cmd.cycles, true);
     } else if (cmd.level == 2) {
       // Khẩn cấp: LED nháy theo nhịp, CÒI KÊU LIÊN TỤC (PWM)

@@ -8,8 +8,8 @@
 #include <ArduinoJson.h>
 
 // ==== Cấu hình ESPNOW/Wi-Fi ====
-static const uint8_t ESPNOW_CHANNEL = 10;   // đồng bộ với AP của bạn
-static const int8_t  TX_POWER = 78;         // ~19.5 dBm
+static const uint8_t ESPNOW_CHANNEL = 10;   
+static const int8_t  TX_POWER = 78;         
 
 // ==== WiFi & MQTT (ThingsBoard) ====
 const char* WIFI_SSID = "IphoneHuy";
@@ -53,7 +53,6 @@ const uint16_t TH_MQ4_ALERT       = 1900;
 const uint16_t TH_MQ4_EMERGENCY   = 2100;
 const uint16_t TH_MP2_ALERT       = 2500;
 const uint16_t TH_MP2_EMERGENCY   = 3800;
-//const uint16_t TH_FLAME_ALERT     = 1000;
 const uint16_t TH_FLAME_EMERGENCY = 1;
 
 // ==== State ====
@@ -155,7 +154,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
     // 1) Tắt ngay actuator
     sendActuatorCmd(0);        // level=0 => Node2 tắt LED + buzzer ngay
 
-    // 2) Đặt cửa sổ mute 30s (ưu tiên params.minutes nếu có)
+    // 2) Đặt cửa sổ mute 30s
     int minutes = 0;
     int seconds = 30;          // mặc định 30s
 
@@ -171,7 +170,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
 
     g_muteUntilMs = millis() + durMs;
 
-    // 3) (tuỳ chọn) báo về TB đã nhận
+    //3) báo về TB đã nhận
     StaticJsonDocument<64> rsp;
     rsp["ok"] = true;
     char buf[64];
@@ -181,31 +180,31 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
 
     Serial.printf("[RPC] mute accepted: %lu ms\n", (unsigned long)durMs);
   }
-  else if (strcmp(method, "unmute") == 0) {
-    g_muteUntilMs = 0;
-    sendActuatorCmd(0); // đảm bảo đang im lặng
+  // else if (strcmp(method, "unmute") == 0) {
+  //   g_muteUntilMs = 0;
+  //   sendActuatorCmd(0); // đảm bảo đang im lặng
 
-    StaticJsonDocument<64> rsp;
-    rsp["ok"] = true;
-    char buf[64];
-    size_t n = serializeJson(rsp, buf, sizeof(buf));
-    String respTopic = String("v1/devices/me/rpc/response/") + reqId;
-    mqtt.publish(respTopic.c_str(), buf, n);
+  //   StaticJsonDocument<64> rsp;
+  //   rsp["ok"] = true;
+  //   char buf[64];
+  //   size_t n = serializeJson(rsp, buf, sizeof(buf));
+  //   String respTopic = String("v1/devices/me/rpc/response/") + reqId;
+  //   mqtt.publish(respTopic.c_str(), buf, n);
 
-    Serial.println("[RPC] unmute accepted");
-  }
-  else {
-    // Method khác: trả lời lỗi
-    StaticJsonDocument<64> rsp;
-    rsp["ok"] = false;
-    rsp["err"] = "unknown_method";
-    char buf[96];
-    size_t n = serializeJson(rsp, buf, sizeof(buf));
-    String respTopic = String("v1/devices/me/rpc/response/") + reqId;
-    mqtt.publish(respTopic.c_str(), buf, n);
+  //   Serial.println("[RPC] unmute accepted");
+  // }
+  // else {
+  //   // Method khác: trả lời lỗi
+  //   StaticJsonDocument<64> rsp;
+  //   rsp["ok"] = false;
+  //   rsp["err"] = "unknown_method";
+  //   char buf[96];
+  //   size_t n = serializeJson(rsp, buf, sizeof(buf));
+  //   String respTopic = String("v1/devices/me/rpc/response/") + reqId;
+  //   mqtt.publish(respTopic.c_str(), buf, n);
 
-    Serial.printf("[RPC] unknown method: %s\n", method);
-  }
+  //   Serial.printf("[RPC] unknown method: %s\n", method);
+  // }
 }
 
 
@@ -300,7 +299,7 @@ void setupWiFiMqtt() {
                   WiFi.channel(), WiFi.macAddress().c_str());
     g_offlineChanForced = false; // đang online -> không ép kênh
     if (WiFi.channel() != ESPNOW_CHANNEL) {
-      Serial.printf("[WARN] AP CH=%d khác ESPNOW_CH=%u. Hãy để AP ở kênh 10.\n",
+      Serial.printf("[WARN] AP CH=%d khác ESPNOW_CH=%u. \n",
                     WiFi.channel(), ESPNOW_CHANNEL);
     }
   } else {
@@ -330,7 +329,7 @@ void setup() {
 }
 
 void loop() {
-  // Fallback an toàn: nếu mất Wi-Fi sau khi đã chạy, ép lại kênh ESPNOW để Node2 vẫn nhận lệnh
+  // Fallback an toàn: nếu mất Wi-Fi sau khi đã chạy, ép lại kênh ESPNOW để Node vẫn nhận lệnh
   if (WiFi.status() != WL_CONNECTED) {
     if (!g_offlineChanForced) {
       if (esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE) == ESP_OK) {
